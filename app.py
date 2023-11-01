@@ -1,13 +1,11 @@
-from flask import Flask, render_template, request, redirect, url_for, flash
-from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
-from flask_sqlalchemy import SQLAlchemy
+from flask import Flask, render_template, request, redirect, url_for, flash,session
 import mysql.connector
 import requests
 import time
 import threading
-import secrets
 
 app = Flask(__name__, template_folder='templates')
+app.secret_key = 'xyzsdfg'
 
 # Établir une connexion à la base de données MySQL
 connection = mysql.connector.connect(
@@ -18,73 +16,20 @@ connection = mysql.connector.connect(
 )
 cursor = connection.cursor()
 
-app.secret_key = secrets.token_hex(16)  # Remplacez par votre clé secrète
-
-# Créez un objet LoginManager
-login_manager = LoginManager()
-login_manager.login_view = "login"  # Redirigez l'utilisateur vers la page de connexion s'il n'est pas connecté
-login_manager.init_app(app)
-
-# Configuration de la base de données MySQL
-app.config[
-    'SQLALCHEMY_DATABASE_URI'] = 'mysql://root:@localhost/app_py'  # Remplacez les informations de connexion à MySQL
-db = SQLAlchemy(app)
-login_manager = LoginManager(app)
-
-
-class User(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(80), unique=True, nullable=False)
-    email = db.Column(db.String(120), unique=True, nullable=False)
-
-    def __repr__(self):
-        return f'<User {self.username}>'
-
-
-@login_manager.user_loader
-def load_user(user_id):
-    return User.query.get(int(user_id))
-
-
-@app.route("/login", methods=["GET", "POST"])
-def login():
-    if request.method == "POST":
-        username = request.form["username"]
-        password = request.form["password"]
-        user = User.query.filter_by(username=username).first()
-        if user and user.password == password:
-            login_user(user)  # Utilisez login_user pour connecter l'utilisateur
-            flash("Connexion réussie", "success")
-            return redirect(url_for("accueil"))  # Redirigez vers la page d'accueil après la connexion
-        else:
-            flash("Nom d'utilisateur ou mot de passe incorrect", "danger")
-    return render_template("login.html")
-
-
-@app.route('/dashboard')
-@login_required
-def dashboard():
-    return 'Tableau de bord - Vous êtes connecté en tant que ' + current_user.username
-
-
-@app.route('/logout')
-@login_required
-def logout():
-    logout_user()
-    return redirect(url_for('login'))
-
-
 # Variable pour stocker les alertes
 alertes = []
 
 
+
 # Page d'accueil : Afficher les alertes pour le Bitcoin depuis la base de données
-@app.route("/")
+@app.route("/accueil", methods=["GET", "POST"])
 def accueil():
-    # Sélectionnez uniquement les alertes pour le Bitcoin (BTC)
-    cursor.execute("SELECT id, cryptomonnaie, prix FROM alertes WHERE cryptomonnaie = 'BTC'")
+    cryptomonnaie = request.args.get("cryptomonnaie",
+                                     default="BTC")  # Récupérez la cryptomonnaie à partir de la requête
+    query = "SELECT id, cryptomonnaie, prix, devise FROM alertes WHERE cryptomonnaie = %s"
+    cursor.execute(query, (cryptomonnaie,))
     alertes = cursor.fetchall()
-    return render_template("accueil.html", alertes=alertes)
+    return render_template("accueil.html", alertes=alertes, cryptomonnaie=cryptomonnaie)
 
 
 # Fonction pour obtenir les données de prix du Bitcoin
@@ -114,14 +59,12 @@ else:
 
 # surveillance de changement de prix
 def mechanism_change_prix():
-    while True:  # boucle infinie pour surveiller les prix
+    while True:
         prix_actuel = prix_bitcoins()
-        # boucle pour comparer le prix actuel avec les alertes
         for alerte in alertes:
-            if prix_actuel < alerte['prix']:
+            if prix_actuel * (1 - alerte['pourcentage'] / 100) <= alerte['prix']:
                 notifier_utilisateur(alerte)
-
-        time.sleep(60)  # attendre 60s pour mettre a jour le nouveaux prix
+        time.sleep(60)
 
 
 # Fonction pour notifier l'utilisateur
@@ -160,6 +103,56 @@ def supprimer_alerte(alerte_id):
     cursor.execute(delete_alert_query, (alerte_id,))
     connection.commit()
     return redirect(url_for("accueil"))
+
+@app.route('/')
+# Page de login
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        email = request.form['email']
+        password = request.form['password']
+
+        # Vérifier les informations de connexion dans la base de données
+        query = "SELECT id, email, password FROM users WHERE email = %s AND password = %s"
+        cursor.execute(query, (email, password))
+        user = cursor.fetchone()
+
+        if user:
+            # Les informations de connexion sont correctes, définir la session
+            session['user_id'] = user[0]
+            flash('Logged in successfully!', 'success')
+            return redirect(url_for('accueil'))
+        else:
+            flash('Invalid email or password. Please try again.', 'error')
+
+    return render_template('login.html')
+
+
+# Page de logout
+@app.route('/logout')
+def logout():
+    session.pop('user_id', None)
+    flash('Logged out successfully!', 'success')
+    return redirect(url_for('login'))
+
+
+# Page d'inscription
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        name = request.form['name']
+        email = request.form['email']
+        password = request.form['password']
+
+        # Insérer l'utilisateur dans la base de données
+        query = "INSERT INTO users (name, email, password) VALUES (%s, %s, %s)"
+        cursor.execute(query, (name, email, password))
+        connection.commit()
+
+        flash('Registration successful! Please login.', 'success')
+        return redirect(url_for('login'))
+
+    return render_template('register.html')
 
 
 if __name__ == "__main__":
